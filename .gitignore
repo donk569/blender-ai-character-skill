@@ -1,0 +1,8 @@
+__pycache__/
+*.pyc
+*.blend
+*.blend1
+*.glb
+*.fbx
+frames/
+renders/
