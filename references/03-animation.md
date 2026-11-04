@@ -379,3 +379,37 @@ print([a.get("name") for a in g.get("animations", [])])
 ```
 
 所有 action 都要 `use_fake_user = True`，否则关闭工程后丢失。
+
+---
+
+## 十四、通用体型版：先做可行性预检
+
+任何动画设计之前先跑 `measure.feasibility(m, spec)`，它回答"这个体型能不能迈步"：
+
+| 字段 | 含义 | 实测案例 |
+|---|---|---|
+| `leg_extend` | 静止时髋→踝 / 腿总长，1.0 表示完全伸直 | 仓鼠 0.994、少女 1.000 |
+| `horiz_margin` | 踝高度不变时脚还能水平移动多少 | 仓鼠 **0.6 mm** |
+| `belly_clearance` | 髋能下降多少才碰腹部 | 仓鼠 **1.0 mm** |
+| `mode` | 建议模式 `step` / `in_place_march` / `no_legs` | 仓鼠 → `in_place_march` |
+
+**仓鼠的教训**：`leg_extend=0.994` + `belly_clearance=1mm` 互相冲突 ——
+迈步需要腿变长（没余量）、弯膝需要降髋（肚子贴地）。强行迈 46 mm，
+实测触地脚悬空 **21.5 mm**，看起来就是在滑行。最终改原地踏步（脚只抬落 8~16 mm），
+走感交给身体摇摆 + 骨盆胸腔反扭 + 摆臂 + 尾巴行波。
+
+### 正负号必须标定（`gait.calibrate_signs`）
+
+不同骨架的"抬腿/甩尾"正负号可以相反。仓鼠实测：**尾巴正 X 才是抬起**
+（和腿相反）。用负值把尾巴扎进地面 117 mm，然后贴地判据把全身抬高 24 mm。
+
+```python
+signs = gait.calibrate_signs(rig, spec)   # {'tail_lift':1, 'thigh_forward':1, ...}
+```
+
+标定方法：给单根骨 +15° 和 −15°，量端点世界坐标往哪个方向动。
+
+### 贴地判据要排除尾巴/裙摆
+
+尾巴贴地是正常姿态。若把它算进"最低点"，每帧都会把全身抬起来。
+`grounding.non_appendage_mask` 排除尾巴链与附肢的权重顶点。

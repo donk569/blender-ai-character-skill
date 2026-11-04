@@ -1,145 +1,148 @@
 ---
 name: blender-character-pipeline
-description: 从三视图到带动画角色的完整 Blender 流水线——输入正面/侧面/背面三视图，产出带骨架、蒙皮和循环动画（Idle/Walk/Run/Attack）的 .blend 与 .glb。三阶段各有强制人工确认卡点。当用户给出角色三视图、要求"按图建模""绑骨骼""做角色动画""生成走路跑步动画"，或需要在 Blender 中通过脚本完成角色资产时使用。
+description: 从三视图（或任意单张角色图）到带动画角色的 Blender 流水线——建模、绑骨、动画三阶段，每阶段强制人工确认。适用于人形、Q 版、动物、四足、胖圆体型等任意比例；先量体型再生成骨架，不预设头身比与骨骼命名。当用户给出角色图片要求"按图建模""绑骨骼""做走路跑步动画""生成带动画的角色"，或需要把参考图变成可用的 .blend/.glb 资产时使用。
 ---
 
-# Blender 角色流水线：三视图 → 模型 → 骨架 → 动画
+# Blender 角色流水线（通用体型）
 
-## 这个 skill 解决什么
+把一张（或三张）角色图变成可动画的 3D 角色。**三阶段，每阶段结束必须停下来给用户看，确认后才继续。**
 
-用代码在 Blender 里做角色，最容易掉进两个坑：
+```
+角色图 ──▶ ① 建模 ──▶ ⛔ 确认 ──▶ ② 骨架+蒙皮 ──▶ ⛔ 确认 ──▶ ③ 动画 ──▶ 交付
+```
 
-1. **用基础几何体拼人** —— 圆柱当胳膊、球当脑袋。做出来永远是"积木人"，无论怎么调参数。
-2. **动画靠手调数值** —— 看着关键帧数字对，动起来抽搐、顺拐、脚飘。
+## 五条铁律
 
-本 skill 是踩完这些坑之后的成品流程。核心结论：
-
-- **建模**：单张视图喂给图生 3D 服务出底模，再在 Blender 里修材质、缩放、对齐。手搓代码建模的天花板是"能看出是这个角色"，够不到"逼真"。
-- **绑骨**：AI 生成的网格有几千个分离壳体，骨骼热权重直接失败。必须走「体素重构代理体 → 代理算权重 → 转回原网格」。
-- **动画**：抽搐/顺拐/脚飘的根因几乎都不是"参数没调好"，而是**插值方法、坐标系、相位定义**三件事。细节见 `references/03-animation.md`。
-
-## 三阶段流程（每阶段必须停下来等确认）
-
-> **铁律：每个阶段完成后必须交付产物并明确问用户"是否继续"，得到确认才能进入下一阶段。**
-> 不要一口气跑完三段再给结果。用户需要在中途看到东西、提修改意见。
-
-### 阶段一：建模
-
-**输入**：用户提供的三视图（正面 / 侧面 / 背面，最好是同一张图里的三格）。
-
-**做法**：
-1. 裁出单张正视图（`PIL` 按比例切割）
-2. 图生 3D 出底模（混元 / Tripo / Meshy，选一个可用的）
-3. 导入 Blender：按包围盒缩放到目标身高、脚底贴 z=0、居中对齐
-4. **修材质**（关键）：图生 3D 导出的 GLB 里 metallic/roughness 常是打包贴图，Blender 解释后金属度接近 1，渲染成铬金属人。必须断开 Metallic/Roughness 的贴图输入，改 metallic=0、roughness≈0.62
-5. 四视图渲染
-
-**交付物**：`.blend` + 四视图渲染（front/side/back/three-quarter）
-
-**⛔ 停下问用户**：模型像不像？哪里要改？确认后才能绑骨。
-
-详细步骤 → `references/01-modeling.md`
-
----
-
-### 阶段二：骨架与蒙皮
-
-**输入**：阶段一确认过的网格。
-
-**做法**：
-1. 建 23 骨人形骨架（root → hips → spine → chest → upper_chest → neck → head，每侧 shoulder/upper_arm/forearm/hand + thigh/shin/foot/toe）
-2. **不要直接对原网格算骨骼热权重** —— AI 网格是几千个分离壳体，热权重会全部返回 0
-3. 复制网格 → VOXEL Remesh **0.008**（这个值是试出来的甜点，0.006 和 0.0035 都会让热权重失败）→ 水密代理
-4. 代理上算热权重 → DataTransfer（POLYINTERP_NEAREST）转回原网格
-5. 收尾：跨区域壳体（同时被手臂和躯干拉扯的）改成刚性绑定；被误绑到手/前臂但离心 >0.10m 的壳体改绑最近的 hips/thigh/spine
-6. 加 4 根非变形控制骨（ctrl_foot.L/R、ctrl_hand.L/R）供 IK 用
-
-**交付物**：`_rig.blend` + 姿势验证渲染（抬手、迈腿、转头三张）
-
-**⛔ 停下问用户**：摆姿势会不会撕裂？关节有没有塌陷？确认后才能做动画。
-
-详细步骤 → `references/02-rigging.md`
-
----
-
-### 阶段三：动画
-
-**输入**：阶段二确认过的骨架。
-
-**做法**：
-1. 先确认角色朝向（读 `foot` 骨骼的 head→tail 向量判断哪边是前方，不要假定 -Y）
-2. 用**解析两骨 IK** 驱动腿（不用 constraints，见下方"绝对不要做"）
-3. 参数全部写成**相位查表**，用 `scripts/gspline.py` 的 C1 连续插值
-4. 逐帧摆姿势 → **记录** loc/quat → 全部摆完再统一写关键帧（"先记录后写"）
-5. 四元数强制符号连续
-6. 逐帧贴地校正
-7. **用数据验收**，不是肉眼：单帧角跳变、地面 min_z、左右脚漂移、交叉相关系数、循环接缝
-8. 逐帧渲染 → 合成 GIF → 实际看
-
-**交付物**：`_anim.blend` + `_anim.glb` + 每个动作的 GIF + 指标表
-
-**⛔ 停下问用户**：动作自不自然？确认后才交付。
-
-详细步骤 → `references/03-animation.md`
-
----
-
-## 绝对不要做的事
-
-这些每一条都是实际踩过的坑，代价是几轮返工：
-
-| 不要 | 为什么 |
-|---|---|
-| 用圆柱/球体拼角色 | 天花板就是积木人，改参数救不回来 |
-| 对 AI 生成网格直接算热权重 | 几千个分离壳体，结果全 0 权重 |
-| 在 action 已挂载时摆姿势 | `view_layer.update()` 会用当前帧关键帧重新求值，把手摆的姿势冲掉 |
-| 用 `t = 0.5 - 0.5*cos(πt)` 分段插值 | 每个控制点导数归零 → 周期性微停顿，动作"一顿一顿" |
-| 给骨骼加 IK constraint 但不给 pole target | 膝盖会自己翻转，单帧跳 40°+ |
-| 用欧拉角改 `upper_arm.rotation_euler[0]` 摆臂 | 骨骼 roll 导致正反角度都把手带到身前，双臂挤在胸前 |
-| 把扭转写进 `rotation_euler[2]` | 骨骼局部 Y 沿骨（= 世界 Z 的偏航），Z 是**侧倾**。写错就变成整个人歪着走 |
-| 手臂用 cos、腿用三角波 | 两条曲线谷值差 0.18 周期 → 顺拐。必须极值点严格对齐 |
-| `chest.matrix @ Vector((x, y, 绝对Z))` 传绝对坐标 | 局部偏移必须减去骨骼 head，否则手臂被甩到头顶 |
-| 单独给 hand 设 aim 朝向 | `rotation_difference` 的 roll 会抖，单帧 52-65°。让 hand 继承前臂 + 绕局部 Y 固定扭转 |
-| 只跑脚本成功就宣布完成 | 必须逐帧渲染 + 算指标 + 看 GIF |
+1. **不假设体型。** 没有任何"标准人形"参数可以套。头身比 1:3 的 Q 版、四足动物、贴地的胖仓鼠，都靠测量决定骨架比例，见 `scripts/measure.py`。
+2. **不假设朝向。** 面的正前方不一定是 `-Y`。用脚（脚掌一定朝前伸）判定，不要用头（长发/耳朵/角会反向）。
+3. **不假设网格是好的。** AI 生成的网格常见几千个壳体、重叠薄片、非流形边。所有算法必须对这种网格成立。
+4. **每阶段先备份。** 新阶段另存 `*_model.blend` / `*_rig.blend` / `*_anim.blend`，不覆盖上一阶段。
+5. **不靠"脚本跑通"验收。** 必须渲染出图看，并用数值指标（角度跳变、脚底高度、权重覆盖率）交叉验证。
 
 ## 环境准备
 
-**Blender 端**：装 `mcp-for-blender` 插件（addon 名 `blender_mcp`），开启 socket 服务（默认端口 9876）。
-
-Blender 没在运行时，可以用脚本自动拉起：
+Blender 5.0 + 插件 `blender_mcp`（socket 9876）。若 Blender 没开：
 
 ```bash
-blender.exe --python scripts/boot_blender.py
+blender.exe --python scripts/boot_blender.py     # 自动启用插件、开服务、加载工程
 ```
 
-（`boot_blender.py` 会 `addon_enable("blender_mcp")` → `bpy.types.blendermcp_server = BlenderMCPServer(port=9876)` → `.start()` → `wm.open_mainfile`，不需要点 UI。）
-
-**调用端**：不需要 MCP 工具注册，直接用 socket：
+与 Blender 通信（不依赖 MCP 工具注册，直接走 socket）：
 
 ```bash
-python scripts/blender_bridge.py scene                      # 看场景
-python scripts/blender_bridge.py run path/to/script.py      # 执行 py 文件
+python scripts/blender_bridge.py scene                     # 看场景
+python scripts/blender_bridge.py run path/to/script.py     # 在 Blender 里执行脚本
 ```
 
-所有操作脚本落盘成 `.py` 文件再执行，**不要**通过命令行传大段代码（Windows 命令行有长度限制，中文路径还会出编码问题）。
+脚本里 `import` 本 skill 的模块：
 
-## 数据验收指标
+```python
+import sys; sys.path.insert(0, r"<skill>/scripts")
+import measure, archetypes, rig_build, weights, envelope, grounding, gait, ctx
+```
 
-每次改完动画，跑 `scripts/verify.py` 拿这张表，指标不合格就不要交付：
+---
 
-| 指标 | 合格线 | 说明 |
+## 阶段一：建模
+
+**目标**：拿到一个比例、配色、服装都对得上参考图的网格。目标不是可交付的成品模型。
+
+1. 从参考图切出**单张正视图**（三视图时取正面那张；单图直接用）。
+2. 图生 3D 出底模（`buddy-multimodal-generation` skill，`3d --image-base64 ... --enable-pbr --face-count 300000`）。
+3. 下载要**断点续传**（`Range: bytes=pos-`），几十 MB 一次 curl 常断。
+4. 导入 Blender：按包围盒缩放到目标身高、脚底贴 z=0、水平居中、apply 变换。
+5. **材质必查**：GLB 打包的 metallic/roughness 是贴图，Blender 解释后金属度接近 1 → 渲染成铬金属人。断开贴图输入、`metallic=0`、`roughness≈0.6`。
+6. 渲染四视图 + 正面特写。
+
+**⛔ 停。** 给用户看四视图，逐条列出"对上了什么"和"没做到什么"（缺件、破面、比例偏差），等确认。
+
+详见 `references/01-modeling.md`。
+
+## 阶段二：骨架 + 蒙皮
+
+**目标**：任意体型都能自动生成骨架并蒙皮，且摆姿势不撕裂。
+
+```python
+m    = measure.measure(mesh_obj)                       # 量体型
+arch, why = measure.guess_archetype(m)                # humanoid / biped_small / quadruped
+spec = archetypes.build_spec(m, arch)                 # 生成骨骼清单（世界坐标）
+rig  = rig_build.build_armature(spec, name="Rig")     # 建骨架（纯 FK，零约束）
+rig_build.attach_mesh(mesh_obj, rig)                  # 烘焙变换 + 挂 Armature
+stats = weights.auto_weights(mesh_obj, rig, spec)      # 默认包络权重
+feas = measure.feasibility(m, spec)                   # 能不能迈步（阶段三要用）
+```
+
+- **先用 `measure.report()` 打印全部测量值**，检查裆高、朝向、接触块是否符合肉眼判断。测错则整条链都错。
+- 骨架是**纯 FK、零约束**。IK 约束没有 pole target 会在某些角度突然翻膝（单帧 46°，人眼即"抽搐"），解析式两骨 IK 写成 FK 才是稳的。
+- 蒙皮默认**包络权重**（`envelope.py`）：只看顶点到骨骼线段的距离，与网格拓扑无关。热权重在 AI 网格上要么全 0、要么一根骨吃掉 60%，只作为可选（`method="heat"`）。
+- 摆极限姿势渲染（抬臂、抬腿、转腰、甩尾）逐张看。
+
+**⛔ 停。** 给用户看"静止 vs 姿势"对照图，报告权重覆盖率与越界位移，等确认。
+
+详见 `references/02-rigging.md`。
+
+## 阶段三：动画
+
+**目标**：物理与解剖都成立的循环动画，且每个量都有实测依据。
+
+**先做可行性预检**（`measure.feasibility`），它决定这一阶段的所有设计：
+
+| 实测 | 含义 | 采取的方案 |
 |---|---|---|
-| 单帧最大角跳变 | < 20° | 超过 30° 一定有翻转或坐标系错 |
-| 地面 min_z | −3 ~ 0 mm | 负太多是穿地，正太多是浮空 |
-| 支撑脚单帧位移 | 恒定 | 速度忽快忽慢 = 插值在控制点归零 |
-| 交叉相关系数 | 同侧 < −0.9，对侧 > +0.9 | 顺拐会变成正相关 |
-| 循环接缝 | 与其他帧相当 | 明显偏大说明首尾没对上 |
-| root 通道 fcurve 数 | 0 | 原地动画不该有根位移 |
+| `leg_extend ≈ 1.0`（>0.99） | 腿已伸直，没有弯膝余量 | 不能迈步 → 改原地踏步 `in_place_march` |
+| `horiz_margin < 3mm` | 脚向前迈会够不到地面 | 同上，步幅归零 |
+| `belly_clearance < 5mm` | 肚子贴地，抬髋就穿模 | 起伏交给脚，不给髋 |
+| 三项都宽松 | 正常双足 | `step`：支撑相脚钉地、摆动相前摆 |
 
-## 参考文件
+```python
+signs = gait.calibrate_signs(rig, spec)   # 旋转正负号必须实测标定，别凭直觉
+plan  = gait.plan_gait(feas, m["height"], "walk")
+```
 
-- `references/01-modeling.md` — 图生 3D 流程、材质修复、尺寸对齐
-- `references/02-rigging.md` — 骨架结构、代理体热权重、壳体收尾
-- `references/03-animation.md` — 相位设计、解析 IK、C1 插值、贴地、验收
-- `references/troubleshooting.md` — 症状 → 根因 速查表
-- `scripts/` — 可直接复用的桥接、插值、建模工具、验收脚本
+动画制作的六条硬规则：
+
+1. **先记录后写帧**：构建期间 `rig.animation_data.action = None`，逐帧摆姿势记录 loc/quat，最后统一写关键帧。否则 `view_layer.update()` 会用旧关键帧把手摆的姿势冲掉。
+2. **插值用 C1 连续单调三次样条**（`gspline.smooth_table`），不要用 `0.5-0.5cos(πt)` 分段缓动——后者在每个控制点导数归零，动作会一顿一顿。
+3. **骨骼轴要标定**：扭转走 `rotation_euler[1]`（沿骨轴），俯仰 `[0]`，侧倾 `[2]`。写错轴会让"扭转"变成"歪着走"。
+4. **摆臂用世界方向瞄准**（`grounding.aim_matrix`），不要用欧拉角——骨骼 roll 会让正负角都朝前，出现双臂挤胸、同手同脚。
+5. **脚掌世界朝向单独控制**（`grounding.place_feet`）：IK 只固定踝位置，脚骨仍随小腿翻转。
+6. **逐帧贴地闭环**：量变形后网格最低点，修正脚目标高度迭代直到 |z| < 1mm。
+
+**⛔ 停。** 交付循环预览 GIF（至少 3 个周期）+ 关键帧条 + 指标表，等确认。
+
+详见 `references/03-animation.md`。
+
+## 验收指标（每阶段都要报）
+
+| 指标 | 合格线 | 测法 |
+|---|---|---|
+| 单帧最大角跳变 | < 20°/帧（非循环动作 < 40°） | 逐帧相邻骨骼世界四元数夹角 |
+| 地面 min_z | > -3mm | 变形后网格逐帧最低点 |
+| 漏权顶点 | 0 | 顶点权重和 < 0.01 的个数 |
+| 无权重骨 | 0 | 该骨最大权重 < 0.15 |
+| 交叉协调 corr(腿L, 臂L) | < -0.9（循环动作） | 逐帧世界位置或速度的相关系数 |
+| 循环接缝 | < 15° / < 100mm | 末帧 vs 首帧 |
+| 根通道 fcurve | 0 条 | 原地动画不得有 root 位移 |
+
+## 脚本清单
+
+| 文件 | 职责 |
+|---|---|
+| `measure.py` | 体型测量、体型分类、可行性预检、报告 |
+| `archetypes.py` | 骨骼模板与 spec 生成（按实测比例缩放） |
+| `rig_build.py` | 建骨架、烘焙网格变换、挂 Armature |
+| `envelope.py` | 包络权重（默认蒙皮） |
+| `weights.py` | 热权重/代理体/解析权重（可选路径）+ 校验 |
+| `grounding.py` | 脚部落点、世界朝向瞄准、贴地 |
+| `gait.py` | 正负号标定、步态规划、周期函数、写 Action |
+| `ctx.py` | `bpy.ops` 上下文兜底（open_mainfile 后 window 为 None 的坑） |
+| `blender_bridge.py` | socket 桥接 |
+| `boot_blender.py` | 无 UI 拉起 Blender 并开服务 |
+
+## 已知边界（必须向用户说明）
+
+1. **包络权重对复杂分层服装会拉伸**：连帽衫的帽/下摆与袖子是同一张连续面，转臂时会被拉成"帘子"。这类资产建议 `method="heat"` 或手工补权重。
+2. **腿已伸直的模型做不出真实步幅**，只能原地踏步；要真迈步得改模型（腿加长 / 腹部抬高）。
+3. **重叠薄片会导致"重影"**：AI 网格常有位置重合的重复面片，摆姿势时各自飞到不同位置。`envelope.unify_coincident` / 权重按位置统一能缓解，但几何本身还是多股。
+4. **没有手指骨、表情骨**：手掌是单骨，脸是贴图。
+5. 程序化动画缺少真人动捕的细微不规则；要再上一个台阶需 BVH 重定向。
